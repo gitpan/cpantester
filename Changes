@@ -1,8 +1,11 @@
 Revision history for Perl script cpantester.
 
+0.01_03 2005/02/25
+ - Fatal errors and exits will be reported via mail to login@localhost.
+ - Distributions are skipped upon the detection of prerequisites.
+
 0.01_01 2005/02/25
- - Several patches applied as suggested
-   by Uri Guttman.
+ - Several patches applied as suggested by Uri Guttman.
 
 0.01_00 2005/02/25
  - Developer release.

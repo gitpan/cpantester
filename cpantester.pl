@@ -4,36 +4,40 @@ use strict;
 use vars qw(
     $VERSION
     $NAME
+    $PROMPT
     $VERBOSE
     $INTERACTIVE
-    $PROMPT
+    $POLL
     $ftp
 );
 use warnings;
-use CPANPLUS;
+#use CPANPLUS::Backend;
+#use CPANPLUS::Internals;
 use File::Slurp;
+use File::Temp;
 use Getopt::Long;
 use Net::FTP;
 use Test::Reporter;
 
-
-
-$PROMPT = "#";
-$INTERACTIVE = 0;
-$VERBOSE  = 0;
-
-
-
 {
     my $conf = parse_args();
-    test( $conf, fetch( $conf ), read_track( $conf ) );
+    
+    if (not $POLL) {
+        print "--> Mode: non-polling, 1\n" if $VERBOSE;
+        test( $conf, fetch( $conf ), read_track( $conf ) );
+    } else {
+        print "--> Mode: polling, 1 <--> infinite\n" if $VERBOSE;
+        while (1) { test( $conf, fetch( $conf ), read_track( $conf ) ) }
+    }
+    
+    exit 0;
 }
 
 sub test {
     my ($conf, $files, $got_file) = @_;
     
     my $TRACK = \*TRACK;
-    open ($TRACK, ">>$conf->{track}") or err_quit( $conf->{track}, 'o+' );
+    open ($TRACK, ">>$conf->{track}") or die_mail( "Couldn't open $conf->{track} for writing: $!\n " );
 
     for my $file (@{$files}) {
         next if ($got_file->{$file} || $file !~ /tar.gz$/);
@@ -49,156 +53,138 @@ sub test {
 	}
       
         $ftp->get( $file, "$conf->{dir}/$file" )
-          or die "Couldn't get $file: ", $ftp->message;
+          or die_mail( "Couldn't get $file: ", $ftp->message );
 	
-	my $error = 0;
+	my $skip = 0;
 	
-	chdir ( "$conf->{dir}" ) or die "Couldn't cd to $conf->{dir}: $!\n";
+	chdir ( "$conf->{dir}" ) or die_mail( "Couldn't cd to $conf->{dir}: $!\n" );
 	
 	if ($INTERACTIVE) { 
 	    my $input = user_input( "tar xvvzf $file -C $conf->{dir}? [Y/n]: " );
             next if ($input eq 'n'); 
-	} elsif ($VERBOSE) { 
-	    warn "tar xvvzf $file -C $conf->{dir}...\n" 
 	}
 	
     	my @tar = `tar xvvzf $file -C $conf->{dir}`;
 	if ($VERBOSE) { warn @tar }
-	die "Could not tar xvvzf $file -C $conf->{dir}: $?\n" if ($? != 0);
+	die_mail( "$dist: tar xvvzf $file -C $conf->{dir}: $?\n" ) if ($? != 0);
 	
 	my $dist_dir = "$conf->{dir}/$dist";
 	
     	unless (chdir ( "$dist_dir" )) {
-	    warn "Could not cd to $dist_dir, skipping...\n"; 
-	    $error = 1; 
+	    warn "--> Could not cd to $dist_dir, processing next distributuion\n"; 
+	    $skip = 1; 
 	}
 	
-	$error = 1 if (-e "$dist_dir/Build.PL" || ! -e "$dist_dir/Makefile.PL");
+	if (-e "$dist_dir/Build.PL") {
+	    warn "--> Build.PL exists, processing next distribution\n";
+	    $skip = 1;
+	}
+
+	next if $skip;
 	
-	unless ($error) {
-   	    if ($INTERACTIVE) { 
-		my $input = user_input( 'perl Makefile.PL? [Y/n]: ' );
-                next if ($input eq 'n');
-	    }
-	    my @makefile = `perl Makefile.PL`;
-	    die "perl Makefile.PL exited on $?\n" if ($? != 0);
-	    if ($VERBOSE) {
-	        warn "perl Makefile.PL...\n" unless $INTERACTIVE;
-	        warn @makefile;
-	    }
 	
-	    for my $line (@makefile) {
-	        if ($line =~ /(?:error|not found)/i) {
-		    CPANPLUS::install( $dist );
-	            #print "Prerequisites missing, skipping...\n";
-		    #$error = 1 && last TEST;
-	        }
-	    }
+   	if ($INTERACTIVE) { 
+	    my $input = user_input( 'perl Makefile.PL? [Y/n]: ' );
+            next if ($input eq 'n');
+	}
+	    
+	my @fetch_dists;
+	    
+	my $stdout = tmpnam();
+	my $stderr = tmpnam();
+	system( "perl Makefile.PL > $stdout 2>> $stderr" );
+	open (TMPFILE, $stderr) or die_mail( "Could not open $stderr: $!\n" );
+	while (my $line = <TMPFILE>) {
+	    if (my ($dist, $version) = $line =~ /^Warning: prerequisite (\w+::\w+) (.+) not found\.$/) {
+	        $skip = 1;
+            }
+        }    
+	close (TMPFILE) or die_mail( "Could not close $stderr: $!\n" );	    
+	die_mail( "$dist: perl Makefile.PL exited on $?\n" ) if ($? != 0);
+
+	#my $cb = CPANPLUS::Backend->new();
+	#$cb->fetch( modules => \@fetch_dists );
+	#$cb->install( modules => \@fetch_dists );
+	#my $id = CPANPLUS::Internals::_id ( $cb );
+	#CPANPLUS::Internals::_remove_id( $id );
+	    
+	if ($VERBOSE) {
+	    warn "perl Makefile.PL...\n" unless $INTERACTIVE;
+	    warn read_file( $stdout );
+	}
+
+        next if $skip;
+	
+        if ($INTERACTIVE) { 
+	    my $input = user_input( 'make? [Y/n]: ' );
+            next if ($input eq 'n');
+	}
+	my @make = `make`;
+	die_mail( "$dist: make exited on $?\n" ) if ($? != 0);
+	if ($VERBOSE) {
+	    warn "make...\n" unless $INTERACTIVE;
+	    warn @make;
+	}
+	   
+	if ($INTERACTIVE) { 
+	    my $input = user_input( 'make test? [Y/n]: ' );
+            next if ($input eq 'n'); 
+	}
+	my @maketest = `make test`;
+	die_mail( "$dist: make test exited on $?\n" ) if $? != 0;
+	if ($VERBOSE) {
+	    warn "make test...\n" unless $INTERACTIVE;
+	    warn @maketest;
+	}
+	
+	report( $conf, $dist, \@maketest );
+    	    
+        if ($INTERACTIVE) { 
+            my $input = user_input( 'make realclean? [Y/n]: ' );
+            next if ($input eq 'n'); 
         }
-        #TEST:
-	
-        unless ($error) {
-            if ($INTERACTIVE) { 
-	        my $input = user_input( 'make? [Y/n]: ' );
-                next if ($input eq 'n');
-	    }
-	    my @make = `make`;
-	    die "make exited on $?\n" if ($? != 0);
-	    if ($VERBOSE) {
-	        warn "make...\n" unless $INTERACTIVE;
-	        warn @make;
-	    }
-	    
-	    if ($INTERACTIVE) { 
-	       	my $input = user_input( 'make test? [Y/n]: ' );
-                next if ($input eq 'n'); 
-	    }
-	    my @maketest = `make test`;
-	    die "make test exited on $?\n" if $? != 0;
-	    if ($VERBOSE) {
-	        warn "make test...\n" unless $INTERACTIVE;
-		warn @maketest;
-	    }
-	    {
-	        my $reporter = Test::Reporter->new();
-		
-	        $reporter->debug( $VERBOSE ) if $VERBOSE;
-	    
-	        $reporter->from( $conf->{mail} );
-	        $reporter->distribution( $dist );
-		    
-	        my $failed = 0;
-	    
-	        for my $line (@maketest) {
-	            next unless $line =~ /failed/i;
-		    $failed = 1;
-		    last;
-	        }
-		 
-                if ($failed) { 
-		    $reporter->grade('fail');
-		} else { 
-		    $reporter->grade('pass');
-		}
-		 
-                $reporter->send() or die $reporter->errstr();
-            }
+        my @makerealclean = `make realclean`;
+        die_mail( "$dist: make realclean exited on $?\n" ) if ($? != 0);
+        if ($VERBOSE) {
+	    warn "make realclean...\n" unless $INTERACTIVE;
+            warn @makerealclean;
+        }
     	    
-            if ($INTERACTIVE) { 
-                my $input = user_input( 'make realclean? [Y/n]: ' );
-                next if ($input eq 'n'); 
-            }
-            my @makerealclean = `make realclean`;
-            die "make realclean exited on $?\n" if ($? != 0);
-            if ($VERBOSE) {
-	        warn "make realclean...\n" unless $INTERACTIVE;
-                warn @makerealclean;
-            }
-    	    
-            if ($INTERACTIVE) {
-                my $input = user_input( "rm -rf $dist_dir? [Y/n]: " );
-                next if ($input eq 'n'); 
-            }
-            my @rm = `rm -rf $dist_dir`;
-            die "rm -rf exited on $?\n" if ($? != 0);
-            if ($VERBOSE) {
-	        warn "rm -rf $dist_dir...\n" unless $INTERACTIVE;
-                warn @rm;
-	    }
+        if ($INTERACTIVE) {
+            my $input = user_input( "rm -rf $dist_dir? [Y/n]: " );
+            next if ($input eq 'n'); 
+        }
+        my @rm = `rm -rf $dist_dir`;
+        die_mail( "$dist: rm -rf exited on $?\n" ) if ($? != 0);
+        if ($VERBOSE) {
+	    warn "rm -rf $dist_dir...\n" unless $INTERACTIVE;
+            warn @rm;
         }
 	
         print $TRACK "$file\n";
     }
 
-    close ($TRACK) or err_quit( $conf->{track}, 'c' );
+    close ($TRACK) or die_mail( "Couldn't close $conf->{track}: $!\n" );
 
     $ftp->quit;
 }
 
 sub fetch {
     my ($conf) = @_;
-    
-    my @err_msg = (
-        "Couldn't connect to $conf->{host}:",
-	"Couldn't login: ",  
-        "Couldn't switch to binary mode: ",
-	"Couldn't change working directory: ",
-	"Couldn't get list from $conf->{rdir}: ",
-    );
 
     $ftp = Net::FTP->new( $conf->{host}, Debug => $VERBOSE )
-      or die "$err_msg[0]: $@\n";
+      or die_mail( "Couldn't connect to $conf->{host}: ", $ftp->message );
     
     $ftp->login( 'anonymous','-anonymous@' )
-      or err_quit_ftp( $err_msg[1], $ftp );
+      or die_mail( "Couldn't login: ", $ftp->message ); 
   
-    $ftp->binary or err_quit_ftp( $err_msg[2], $ftp );
+    $ftp->binary or die_mail( "Couldn't switch to binary mode: ", $ftp->message );
 
     $ftp->cwd( $conf->{rdir} )
-      or err_quit_ftp( $err_msg[3], $ftp );
+      or die_mail( "Couldn't change working directory: ", $ftp->message );
   
     my @files = $ftp->ls()
-      or err_quit_ftp( $err_msg[4], $ftp );
+      or die_mail( "Couldn't get list from $conf->{rdir}: ", $ftp->message );
 
     @files = sort @files[ 2 .. $#files ];
     
@@ -211,13 +197,41 @@ sub read_track {
     my (%got_file, $TRACK);
     $TRACK = \*TRACK;
     
-    open ($TRACK, $conf->{track}) or err_quit( $conf->{track}, 'o' );
+    open ($TRACK, $conf->{track}) or die_mail( "Couldn't open $conf->{track}: $!\n" );
     chomp (my @files = <$TRACK>);
     @got_file{ @files } = (1) x @files;
-    close ($TRACK) or err_quit( $conf->{track}, 'o' );
+    close ($TRACK) or die_mail( "Couldn't close $conf->{track}: $!\n" );
     
     return \%got_file;
 }
+
+sub report {
+    my ($conf, $dist, $maketest) = @_;
+    
+    my $reporter = Test::Reporter->new();
+		
+    $reporter->debug( $VERBOSE ) if $VERBOSE;
+	    
+    $reporter->from( $conf->{mail} );
+    $reporter->comments("Automatically processed by $NAME $VERSION");
+    $reporter->distribution( $dist );
+		    
+    my $failed = 0;
+	    
+    for my $line (@{$maketest}) {
+        next unless $line =~ /failed/i;
+        $failed = 1 && last;
+    }
+		 
+    if ($failed) { 
+        $reporter->grade('fail');
+    } else { 
+        $reporter->grade('pass');
+    }
+		 
+    $reporter->send() or die_mail( $reporter->errstr() );
+}
+
 
 sub parse_args {
     my $conf = usage();
@@ -239,7 +253,13 @@ sub usage {
     
     my (%conf, %opt);
     
-    GetOptions(\%opt, 'h', 'i', 'v', 'V') or $opt{'h'} = 1;
+    $PROMPT = "#";
+    
+    GetOptions(\%opt, 'h', 'i', 'p', 'v', 'V') or $opt{'h'} = 1;
+    
+    $INTERACTIVE = $opt{i} ? 1 : 0;
+    $VERBOSE     = $opt{v} ? 1 : 0;
+    $POLL	 = $opt{p} ? 1 : 0;
 
     if ($opt{'h'} || $opt{'V'}) {
         if ($opt{'h'}) {
@@ -247,6 +267,7 @@ sub usage {
 usage: $0 [options]
   -h            this help screen
   -i		interactive (defies -v) 
+  -p		run in polling mode
   -v		verbose
   -V            version info
 
@@ -258,9 +279,6 @@ usage: $0 [options]
         }
         exit 0;
     }
-
-    $INTERACTIVE = 1 if $opt{i};
-    $VERBOSE     = 1 if $opt{v};
     
     return \%conf;
 }   
@@ -277,33 +295,41 @@ sub user_input {
     return $input;
 }
 
-sub err_quit {
-    my ($err, $mode) = @_;
+sub die_mail {
+    my @err = @_;
     
-    my %msg = (
-        c    => 'Could not close ',
-	o    => 'Could not open ',
-	'o+' => [ 'Could not open ', ' for reading:', ],
-    );
+    my $login    = getlogin;
     
-    if (ref $msg{$mode} eq 'ARRAY') {
-        die "${$msg{$mode}}[0]$err${$msg{$mode}}[1] $!\n";
-    } else {
-        die "$msg{$mode}$err: $!\n";
+    if ($VERBOSE) {
+        warn "--> Reporting error/exit coincidence via mail to $login", '@localhost', "\n";
     }
-} 
-
-sub err_quit_ftp { 
-    my $ftp = splice (@_, 1, 1);
-    die "@_", $ftp->message;
+    
+    my $sendmail = '/usr/sbin/sendmail';
+    my $from     = "$NAME $VERSION <$NAME".'@localhost>';
+    my $to	 = "$login".'@localhost';
+    my $subject  = "error/exit: @err";
+    
+    open (SENDMAIL, "| $sendmail -t") or die "Could not open | to $sendmail: $!\n";
+    
+    select (SENDMAIL);
+    
+    print <<"MAIL";
+From: $from
+To: $to
+Subject: $subject
+@err
+MAIL
+    close (SENDMAIL) or die "Could not close | to sendmail: $!\n";
+    select (STDOUT);
+    
+    exit ($? != 0) ? $? : -1;
 }
 
 BEGIN {
-    $VERSION = '0.01_02';
+    $VERSION = '0.01_03';
     $NAME = 'cpantester';
 }
 
-1;
 __END__
 
 =head1 NAME
@@ -312,12 +338,13 @@ cpantester - Test CPAN contributions and submit reports to cpan-testers@perl.org
 
 =head1 SYNOPSIS
 
- usage: /scripts/cpantester.pl [options]
+ usage: cpantester.pl [options]
 
 =head1 OPTIONS
 
    -h            this help screen
-   -i		 interactive (defies -v) 
+   -i		 interactive (defies -v)
+   -p		 run in polling mode 
    -v		 verbose
    -V            version info
 
@@ -339,8 +366,17 @@ A .cpantesterrc may be placed in the appropriate home directory.
  dir   = /home/user/cpantests
  track = track.dat
  mail  = user@host.tld (name)
+ 
+=head1 MAIL
+
+Upon errors/exits the coincidence will be reported 
+via mail to login@localhost.
 
 =head1 CAVEATS
+
+=head2 Prerequisites
+
+Distributions are skipped upon the detection of missing prerequisites.
 
 =head2 RSS
 

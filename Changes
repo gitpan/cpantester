@@ -1,5 +1,8 @@
 Revision history for Perl script cpantester.
 
+0.01_06 2005/02/26
+ - Interactive and verbose output are handled in appropriate subs.
+
 0.01_05 2005/02/26
  - Added verbose output when run in polling mode.
 

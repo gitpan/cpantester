@@ -1,6 +1,6 @@
 #! /usr/bin/perl
 
-use strict;
+use strict 'vars';
 use vars qw(
     $VERSION
     $NAME
@@ -18,21 +18,23 @@ use Getopt::Long;
 use Net::FTP;
 use Test::Reporter;
 
+our ($conf, $file, $files, $got_file, $TRACK);
+
 $|++;
 
 main();
 
 sub main {
-    $VERSION = '0.01_05';
+    $VERSION = '0.01_06';
     $NAME = 'cpantester';
 
     my $conf = parse_args();
     
     if (not $POLL) {
-        print "--> Mode: non-polling, 1\n" if $VERBOSE;
+        do_verbose( '', 'STDOUT', "--> Mode: non-polling, 1\n" );
         test( $conf, fetch( $conf ), read_track( $conf ) );
     } else {
-        print "--> Mode: polling, 1 <--> infinite\n" if $VERBOSE;
+        do_verbose( '', 'STDOUT', "--> Mode: polling, 1 <--> infinite\n" );
         while (1) { 
 	    my $PREFIX = '-->';
 	    my $string = 'second(s) until polling again';
@@ -41,7 +43,7 @@ sub main {
 	    test( $conf, fetch( $conf ), read_track( $conf ) ); 
 	    
 	    for (my $sec = $POLL; $sec >= 1; $sec--) {
-	        print "$PREFIX $sec " if $VERBOSE;
+	        do_verbose( '', 'STDOUT', "$PREFIX $sec " );
 		
 		my $fulllen = (length( $PREFIX ) + 1 + length ( $sec ) + 1 + length( $string ));
 		$oldlen = $fulllen unless $oldlen;
@@ -53,7 +55,7 @@ sub main {
 		
 		sleep 1;
 	    }
-	    print "\n--> Polling\n" if $VERBOSE;
+	    do_verbose( '', 'STDOUT', "\n--> Polling\n" );
 	}
     }
     
@@ -61,23 +63,18 @@ sub main {
 }
 
 sub test {
-    my ($conf, $files, $got_file) = @_;
+    local ($conf, $files, $got_file) = @_;
+    local $file;
     
-    my $TRACK = \*TRACK;
+    local $TRACK = \*TRACK;
     open ($TRACK, ">>$conf->{track}") or die_mail( "Couldn't open $conf->{track} for writing: $!\n " );
 
-    for my $file (@{$files}) {
+    for $file (@{$files}) {
         next if ($got_file->{$file} || $file !~ /tar.gz$/);
 	
 	my ($dist) = $file =~ /(.*)\.tar.gz$/;
 	
-	if ($INTERACTIVE) {
-	    my $input = user_input( "$dist - Skip? [y/N]: " );
-            if ($input =~ /^y$/i) {
-	        print $TRACK "$file\n" unless $got_file->{$file};
-		next;
-            }
-	}
+	next if do_interactive( "$dist - Skip? [y/N]: ", '^y$', 'print $TRACK "$file\n" unless $got_file->{$file}' );
       
         $ftp->get( $file, "$conf->{dir}/$file" )
           or die_mail( "Couldn't get $file: ", $ftp->message );
@@ -86,19 +83,16 @@ sub test {
 	
 	chdir ( "$conf->{dir}" ) or die_mail( "Couldn't cd to $conf->{dir}: $!\n" );
 	
-	if ($INTERACTIVE) { 
-	    my $input = user_input( "tar xvvzf $file -C $conf->{dir}? [Y/n]: " );
-            next if ($input =~ /^n$/); 
-	}
+	next if do_interactive( "tar xvvzf $file -C $conf->{dir}? [Y/n]: ", '^n$' );
 	
     	my @tar = `tar xvvzf $file -C $conf->{dir}`;
-	if ($VERBOSE) { warn @tar }
+	do_verbose( '', 'STDERR', @tar );
 	die_mail( "$dist: tar xvvzf $file -C $conf->{dir}: $?\n" ) if ($? != 0);
 	
 	my $dist_dir = "$conf->{dir}/$dist";
 	
     	unless (chdir ( "$dist_dir" )) {
-	    warn "--> Could not cd to $dist_dir, processing next distributuion\n"; 
+	    warn "--> Could not cd to $dist_dir, processing next distribution\n"; 
 	    $skip = 1; 
 	}
 	
@@ -109,10 +103,7 @@ sub test {
 
 	next if $skip;
 	
-   	if ($INTERACTIVE) { 
-	    my $input = user_input( 'perl Makefile.PL? [Y/n]: ' );
-            next if ($input =~ /^n$/i);
-	}
+	next if do_interactive( 'perl Makefile.PL? [Y/n]: ', '^n$' );
 	    
 	my $stdout = tmpnam();
 	my $stderr = tmpnam();
@@ -122,6 +113,7 @@ sub test {
 	open ($TMPFILE, $stderr) or die_mail( "Could not open $stderr: $!\n" );
 	while (my $line = <$TMPFILE>) {
 	    if (my ($dist, $version) = $line =~ /^Warning: prerequisite (\w+::\w+) (.+) not found\.$/) {
+	        do_verbose( 'warn "--> Prerequisites not found, skipping\n" if $VERBOSE' );
 	        $skip = 1;
             }
         }    
@@ -129,58 +121,35 @@ sub test {
 		    
 	die_mail( "$dist: perl Makefile.PL exited on $?\n" ) if ($? != 0);
 	
-	if ($VERBOSE) {
-	    warn "perl Makefile.PL...\n" unless $INTERACTIVE;
-	    warn read_file( $stdout );
-	}
+	do_verbose( 'warn "perl Makefile.PL...\n" unless $INTERACTIVE; warn read_file( $stdout );' );
 
         next if $skip;
 	
-        if ($INTERACTIVE) { 
-	    my $input = user_input( 'make? [Y/n]: ' );
-            next if ($input =~ /^n$/i);
-	}
+	next if do_interactive( 'make? [Y/n]: ', '^n$' );
+	
 	my @make = `make`;
 	die_mail( "$dist: make exited on $?\n" ) if ($? != 0);
-	if ($VERBOSE) {
-	    warn "make...\n" unless $INTERACTIVE;
-	    warn @make;
-	}
-	   
-	if ($INTERACTIVE) { 
-	    my $input = user_input( 'make test? [Y/n]: ' );
-            next if ($input =~ /^n$/i); 
-	}
+	do_verbose( 'warn "make...\n" unless $INTERACTIVE', 'STDOUT', @make );
+	
+	next if do_interactive( 'make test? [Y/n]: ', '^n$' );
+	
 	my @maketest = `make test`;
 	die_mail( "$dist: make test exited on $?\n" ) if $? != 0;
-	if ($VERBOSE) {
-	    warn "make test...\n" unless $INTERACTIVE;
-	    warn @maketest;
-	}
-	
+	do_verbose( 'warn "make test...\n" unless $INTERACTIVE', 'STDOUT', @maketest );
+
 	report( $conf, $dist, \@maketest );
+	
+	next if do_interactive( 'make realclean? [Y/n]: ', '^n$' ); 
     	    
-        if ($INTERACTIVE) { 
-            my $input = user_input( 'make realclean? [Y/n]: ' );
-            next if ($input =~ /^n$/i); 
-        }
         my @makerealclean = `make realclean`;
         die_mail( "$dist: make realclean exited on $?\n" ) if ($? != 0);
-        if ($VERBOSE) {
-	    warn "make realclean...\n" unless $INTERACTIVE;
-            warn @makerealclean;
-        }
+	do_verbose( 'warn "make realclean...\n" unless $INTERACTIVE', 'STDOUT', @makerealclean );
+	
+	next if do_interactive( 'rm -rf $dist_dir? [Y/n]: ', '^n$' ); 
     	    
-        if ($INTERACTIVE) {
-            my $input = user_input( "rm -rf $dist_dir? [Y/n]: " );
-            next if ($input =~ /^n$/i); 
-        }
         my @rm = `rm -rf $dist_dir`;
         die_mail( "$dist: rm -rf exited on $?\n" ) if ($? != 0);
-        if ($VERBOSE) {
-	    warn "rm -rf $dist_dir...\n" unless $INTERACTIVE;
-            warn @rm;
-        }
+	do_verbose( 'warn "rm -rf $dist_dir...\n" unless $INTERACTIVE', 'STDOUT', @rm );
 	
         print $TRACK "$file\n"; # unless $got_file->{$file};
     }
@@ -249,7 +218,7 @@ sub report {
     
     my $reporter = Test::Reporter->new();
 		
-    $reporter->debug( $VERBOSE ) if $VERBOSE;
+    do_verbose( '', 'STDERR', $reporter->debug( $VERBOSE ) );
 	    
     $reporter->from( $conf->{mail} );
     $reporter->comments( "Automatically processed by $NAME $VERSION" );
@@ -341,6 +310,7 @@ sub die_mail {
     my $login    = getlogin;
     
     if ($VERBOSE) {
+        warn "--> @err";
         warn "--> Reporting error coincidence via mail to $login", '@localhost', "\n";
     }
     
@@ -364,6 +334,30 @@ MAIL
     select ($selold);
     
     #exit ($? != 0) ? $? : -1;
+}
+
+sub do_interactive {
+    if ($INTERACTIVE) {
+        my ($prompt, $cond, $eval) = @_;
+    
+        my $input = user_input( $prompt );
+    
+        eval $eval if $eval;
+        die $@ if $@;
+    
+        return ($input =~ /$cond/i) ? 1 : 0;
+    }
+}
+
+sub do_verbose {
+    if ($VERBOSE) {
+        my ($eval, $out, @err) = @_;
+    
+        eval $eval if $eval;
+        die @$ if $@;
+    
+        print $out @err;
+    }
 }
 
 __END__
@@ -408,7 +402,7 @@ A .cpantesterrc may be placed in the appropriate home directory.
  
 =head1 MAIL
 
-Upon errors/exits the coincidence will be reported via mail to login@localhost.
+Upon errors the coincidence will be reported via mail to login@localhost.
 
 =head1 CAVEATS
 

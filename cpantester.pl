@@ -1,8 +1,12 @@
 #! /usr/bin/perl
 
-use strict 'vars';
+use strict;
+no strict 'refs';
 use vars qw($VERSION $NAME);
+use warnings;
+no warnings qw(redefine);
 use Carp 'croak';
+use ExtUtils::MakeMaker;
 use File::Slurp;
 use File::Temp;
 use Getopt::Long;
@@ -10,178 +14,108 @@ use Net::FTP;
 use Test::Reporter;
 use Tie::File;
 
-our ($conf, 
-     $dist_dir, 
-     $file, 
-     $files, 
-     $ftp, 
-     $got_file, 
-     $opt, 
-     $reporter, 
-     $stdout, 
-     $track);
+$VERSION = '0.01_09';
+$NAME = 'cpantester';
 
 $| = 1;
 
 main();
 
 sub main {
-    $VERSION = '0.01_08';
-    $NAME = 'cpantester';
-    
-    local ($conf, $opt) = parse_args();
-    usage( $opt );
-
-    if (not $conf->{POLL}) {
-        do_verbose( '', 'STDOUT', "--> Mode: non-polling, 1\n" );
-        test( $conf, fetch( $conf ), read_track( $conf ) );
-    } else {
-        do_verbose( '', 'STDOUT', "--> Mode: polling, 1 <--> infinite\n" );
-        while (1) { 
-	    my $PREFIX = '-->';
-	    my $string = 'second(s) until polling again';
-	    my $oldlen = 0;
-	    
-	    test( $conf, fetch( $conf ), read_track( $conf ) ); 
-	    
-	    for (my $sec = $conf->{POLL}; $sec >= 1; $sec--) {
-	        do_verbose( '', 'STDOUT', "$PREFIX $sec " );
-		
-		my $fulllen = (length( $PREFIX ) + 1 + length ( $sec ) + 1 + length( $string ));
-		$oldlen = $fulllen unless $oldlen;
-		my $blank = $oldlen - $fulllen;
-		$oldlen = $fulllen;
-		
-		print( $string, ' ' x $blank, "\b" x ($fulllen + $blank) ) if ($conf->{VERBOSE} && $sec != 1);
-		$blank = 0;
-		
-		sleep 1;
-	    }
-	    do_verbose( '', 'STDOUT', "\n--> Polling\n" );
-	}
-    }
+    my ($conf) = parse_args();
     
     weed_out_track( $conf );
+    
+    unless ($conf->{POLL}) {
+        do_verbose( $conf, 'STDERR', "--> Mode: non-polling, 1\n" );
+        test( $conf, fetch( $conf ), read_track( $conf ) );
+    } else {
+        do_verbose( $conf, 'STDERR', "--> Mode: polling, 1 <--> infinite\n" );
+	poll( $conf );
+    } 
     
     exit 0;
 }
 
 sub test {
-    local ($conf, $files, $got_file) = @_;
-    local $file;
+    my ($conf, $files, $got_file) = @_;
+    my ($dist, $distindex, $getfile);
     
-    open (local $track, ">>$conf->{track}") or die_mail( "Couldn't open $conf->{track} for writing: $!\n " );
+    open( my $track, ">>$conf->{track}" ) or die_mail( $conf, "Couldn't open $conf->{track} for writing: $!\n " );
+    my $ftp = ftp_initiate( $conf );
+    
+    $ftp->cwd( $conf->{rdir} )
+      or die_mail( $conf, "Couldn't change working directory: ", $ftp->message );
 
-    for $file (@{$files}) {
-        next if ($got_file->{$file} || $file !~ /tar.gz$/);
-	
-	my ($dist) = $file =~ /(.*)\.tar.gz$/;
-	
-	next if do_interactive( "$dist - Skip? [y/N]: ", '^y$', 'print $track "$file\n" unless $got_file->{$file}' );
-      
-        $ftp->get( $file, "$conf->{dir}/$file" )
-          or die_mail( "Couldn't get $file: ", $ftp->message );
-	
-	my $skip = 0;
-	
-	chdir ( "$conf->{dir}" ) or die_mail( "Couldn't cd to $conf->{dir}: $!\n" );
-	
-	next if do_interactive( "tar xvvzf $file -C $conf->{dir}? [Y/n]: ", '^n$' );
-	
-    	my @tar = `tar xvvzf $file -C $conf->{dir}`;
-	do_verbose( '', 'STDERR', @tar );
-	die_mail( "$dist: tar xvvzf $file -C $conf->{dir}: $?\n" ) if $?;
-	
-	local $dist_dir = "$conf->{dir}/$dist";
-	
-    	unless (chdir ( "$dist_dir" )) {
-	    warn "--> Could not cd to $dist_dir, processing next distribution\n";
-	    print $track "$file\n"; 
-	    $skip = 1; 
+    my @install_prereqs;
+    
+    while (@{$files}) {
+        if ($got_file->{$files->[0]} || $files->[0] !~ /^.*tar.gz$/) {
+            shift @{$files};
+	    next;
 	}
 	
-	if (-e "$dist_dir/Build.PL") {
-	    warn "--> Build.PL exists, processing next distribution\n";
-	    print $track "$file\n";
-	    $skip = 1;
+	($dist) = $files->[0] =~ /(.*)\.tar.gz$/;
+	
+	next if process( $conf, '', "$dist - Process? [Y/n]: ", '^n$', $dist );
+	
+	unless (is_prereq( $files, @install_prereqs )) {
+            $ftp->get( $files->[0], "$conf->{dir}/$files->[0]" )
+              or die_mail( $conf, "Couldn't get $files->[0]: ", $ftp->message );
 	}
+	
+	chdir ( $conf->{dir} ) or die_mail( $conf, "Couldn't cd to $conf->{dir}: $!\n" );
+	
+	next if process( $conf, "tar xvvzf $files->[0] -C $conf->{dir}", '[Y/n]', '^n$', $dist );
+	die_mail( $conf, "$dist: tar xvvzf $files->[0] -C $conf->{dir}: $?\n" ) if $?;
+	
+	my $dist_dir = "$conf->{dir}/$dist";
+	$/ = ',';
+	chomp $dist_dir;
+	$/ = "\n";
+	
+	next if dir_file_error( $dist_dir );
 
-	next if $skip;
+	next if process( $conf, 'perl Makefile.PL', '[Y/n]', '^n$', $dist );
 	
-	next if do_interactive( 'perl Makefile.PL? [Y/n]: ', '^n$' );
+	local *ExtUtils::MakeMaker::WriteMakefile = \&get_prereqs;
+	my $makeargs = run_makefile( $dist_dir );
 	
-	my $prereqs_notfound;
-	    
-	local $stdout = tmpnam();
-	my $stderr = tmpnam();
-	system( "perl Makefile.PL > $stdout 2>> $stderr" );
+	my $install_prereqs = 0;
+	my @prereqs;
 	
-	open (my $tmpfile, $stderr) or die_mail( "Could not open $stderr: $!\n" );
-	while (my $line = <$tmpfile>) {
-	    if (my ($dist, $version) = $line =~ /^Warning: prerequisite (\w+::\w+) (.+) not found\.$/) {
-	        $prereqs_notfound = 1;
-            }
-        }    
-	close ($tmpfile) or die_mail( "Could not close $stderr: $!\n" );
+	my $file_current = $files->[0];
 	
-	if ($prereqs_notfound) {
-	    do_verbose( 'warn "--> Prerequisites not found, skipping\n" if $conf->{VERBOSE}', 'STDOUT', '' );
-	    print $track "$file\n";
-	    $skip = 1;
+	process_prereqs( $conf, $makeargs, $getfile, $ftp, $distindex );
+	
+	if ($install_prereqs) {
+	    unshift( @{$files}, @prereqs );
+	    push( @install_prereqs, @prereqs );
+	    $got_file->{$files->[0]} = 1;
+	    next;
 	}
-		    
-	die_mail( "$dist: perl Makefile.PL exited on $?\n" ) if $?;
 	
-	do_verbose( 'warn "perl Makefile.PL...\n" unless $conf->{INTERACTIVE}; warn read_file( $stdout );', 'STDOUT', '' );
-
-        next if $skip;
+	next if process( $conf, 'make', '[Y/n]', '^n$', $dist );
+	next if process( $conf, 'make test', '[Y/n]', '^n$', $dist );
+        next if process( $conf, '', 'report? [Y/n]: ', '^n$', $dist ); 
+	next if process( $conf, 'make realclean', '[Y/n]', '^n$', $dist ); 
+	next if process( $conf, "rm -rf $dist_dir", '[Y/n]', '^n$', $dist );
 	
-	next if do_interactive( 'make? [Y/n]: ', '^n$' );
-	
-	my @make = `make`;
-	die_mail( "$dist: make exited on $?\n" ) if $?;
-	do_verbose( 'warn "make...\n" unless $conf->{INTERACTIVE}', 'STDOUT', @make );
-	
-	next if do_interactive( 'make test? [Y/n]: ', '^n$' );
-	
-	my @maketest = `make test`;
-	die_mail( "$dist: make test exited on $?\n" ) if $?;
-	do_verbose( 'warn "make test...\n" unless $conf->{INTERACTIVE}', 'STDOUT', 'STDOUT', @maketest );
-
-	report( $conf, $dist, \@maketest );
-	
-	next if do_interactive( 'make realclean? [Y/n]: ', '^n$' ); 
-    	    
-        my @makerealclean = `make realclean`;
-        die_mail( "$dist: make realclean exited on $?\n" ) if $?;
-	do_verbose( 'warn "make realclean...\n" unless $conf->{INTERACTIVE}', 'STDOUT', @makerealclean );
-	
-	next if do_interactive( 'rm -rf $dist_dir? [Y/n]: ', '^n$' ); 
-    	    
-        my @rm = `rm -rf $dist_dir`;
-        die_mail( "$dist: rm -rf exited on $?\n" ) if $?;
-	do_verbose( 'warn "rm -rf $dist_dir...\n" unless $conf->{INTERACTIVE}', 'STDOUT', @rm );
-	
-        print $track "$file\n";
+	$got_file->{$files->[0]} = 1;
+        print $track "$files->[0]\n";
+	shift @{$files};
     }
 
-    close ($track) or die_mail( "Couldn't close $conf->{track}: $!\n" );
+    close( $track ) or die_mail( $conf, "Couldn't close $conf->{track}: $!\n" );
 
     $ftp->quit;
 }
 
 sub fetch {
     my ($conf) = @_;
-
-    $ftp = Net::FTP->new( $conf->{host}, Debug => $conf->{VERBOSE} )
-      or die_mail( "Couldn't connect to $conf->{host}: ", $ftp->message );
-    
-    $ftp->login( 'anonymous','anonymous@example.com' )
-      or die_mail( "Couldn't login: ", $ftp->message ); 
-  
-    $ftp->binary or die_mail( "Couldn't switch to binary mode: ", $ftp->message );
-      
     my @files;
+    
+    my $ftp = ftp_initiate( $conf );
       
     if ($conf->{rss}) {    
 	require LWP::UserAgent;
@@ -192,17 +126,17 @@ sub fetch {
         if ($response->is_success) {
             @files = $response->content =~ /<title>(.*?)<\/title>/gm;  
         } else {
-            die_mail( $response->status_line );
+            die_mail( $conf, $response->status_line );
         }
 	
 	$ftp->cwd( $conf->{rdir} )
-          or die_mail( "Couldn't change working directory: ", $ftp->message ); 
+          or die_mail( $conf, "Couldn't change working directory: ", $ftp->message ); 
     } else {
         $ftp->cwd( $conf->{rdir} )
-          or die_mail( "Couldn't change working directory: ", $ftp->message );
+          or die_mail( $conf, "Couldn't change working directory: ", $ftp->message );
         
 	@files = $ftp->ls()
-          or die_mail( "Couldn't get list from $conf->{rdir}: ", $ftp->message );
+          or die_mail( $conf, "Couldn't get list from $conf->{rdir}: ", $ftp->message );
     }
    
     @files = sort @files[ 2 .. $#files ];
@@ -210,63 +144,96 @@ sub fetch {
     return \@files;
 }
 
-sub read_track {
-    my ($conf) = @_;
+sub fetch_prereq {
+    my ($conf, $getfile, $ftp, $distindex) = @_;    
+    my ($dist, $distcmp, $distdir, @distindex, @distindex_);
     
-    my (%got_file, $track);
+    my $moduleindex = 'http://www.cpan.org/modules/01modules.index.html';
     
-    open (my $track, $conf->{track}) or die_mail( "Couldn't open $conf->{track}: $!\n" );
-    chomp (my @files = <$track>);
-    @got_file{ @files } = (1) x @files;
-    close ($track) or die_mail( "Couldn't close $conf->{track}: $!\n" );
+    do_verbose( $conf, 'STDERR', "$conf->{PREFIX} Fetching module index data from CPAN\n" );
     
-    return \%got_file;
+    require LWP::UserAgent;
+    
+    my $ua = LWP::UserAgent->new;
+    my $response = $ua->get( $moduleindex ); 
+ 
+    if ($response->is_success) {
+        $distindex = $response->content unless defined $distindex;  
+	my @distindex = split /\n/, $distindex;
+	my $distindexsize = @distindex;
+	for (my $i = 0; $distindexsize; $i += 2, $distindexsize--) {
+	    $distindex[$i] ||= ''; $distindex[$i + 1] ||= '';
+	    push( @distindex,"$distindex[$i] . $distindex[$i + 1]" );
+	}
+	for $dist (@distindex) {
+	    $dist ||= '';
+	    if ($dist =~ /gz/) {
+	        ($distdir) = $dist =~ /^\w+\s+<.*?>.*?<\/.*?>\s+<a href="\.\..*?\/(.*)\/.*\.tar\.gz".*/;
+	    }
+	    last if ($dist =~ /$getfile/);
+	}
+    } else {
+        die_mail( $conf, $response->status_line );
+    }
+    
+    ftp_initiate( $conf );
+    
+    $ftp->cwd( "/pub/PAUSE/$distdir" )
+      or die_mail( $conf, "Couldn't change working directory: ", $ftp->message );
+      
+    $ftp->get( "$getfile", "$conf->{dir}/$getfile" )
+      or ftp_redo( $conf, $distdir, $getfile, $ftp );
+	  
+    do_verbose( $conf, 'STDERR', "$conf->{PREFIX} Fetched $getfile from CPAN\n" ); 
 }
 
 sub report {
     my ($conf, $dist, $maketest) = @_;
     
-    local $reporter = Test::Reporter->new();
+    my $reporter = Test::Reporter->new();
 		
-    do_verbose( '$reporter->debug( $conf->{VERBOSE} )', 'STDERR', '' );
+    $reporter->debug( $conf->{VERBOSE} );
 	    
     $reporter->from( $conf->{mail} );
     $reporter->comments( "Automatically processed by $NAME $VERSION" );
     $reporter->distribution( $dist );	    
     $reporter->grade( did_make_fail() );
 	 
-    $reporter->send() or die_mail( $reporter->errstr() );
+    $reporter->send() or die_mail( $conf, $reporter->errstr() );
 }
 
-
 sub parse_args {
-    $Getopt::Long::autoabbrev = 0;
-    $Getopt::Long::ignorecase = 0; 
-    
     my (%conf, %opt);
     
+    $Getopt::Long::autoabbrev = 0;
+    $Getopt::Long::ignorecase = 0; 
+
     GetOptions(\%opt, 'h', 'i', 'p=i', 'v', 'V') or $opt{'h'} = 1;
         
     my $login   = getlogin;
     my $homedir = $login =~ /(root)/ ? "/$1" : "/home/$login";
     
-    my $conf_text = read_file( "$homedir/.cpantesterrc" );
+    my $conf_text = read_file( "$homedir/.cpantesterrc" )
+      or die "Could not open $homedir/.cpantesterc: $!\n";
     %conf = $conf_text =~ /^([^=]+?)\s+=\s+(.+)$/gm;
     
+    $conf{PREFIX}      = '-->';
     $conf{PROMPT}      = '#';
     $conf{INTERACTIVE} = $opt{i} ? 1 : 0;
     $conf{POLL}        = $opt{p} ? $opt{p} : 0;
     $conf{VERBOSE}     = $opt{v} ? 1 : 0;
     
-    return (\%conf, \%opt);
+    if ($opt{h}) {
+        usage();
+    } elsif ($opt{V}) {
+        version();
+    }
+    
+    return \%conf;
 }
 
 sub usage {
-    my ($opt, @err) = @_;
-    
-    if ($opt->{'h'} || $opt->{'V'}) {
-        if ($opt->{'h'}) {
-            print <<"";
+    print <<"USAGE";
 usage: $0 [options]
   -h			this help screen
   -i			interactive (defies -v) 
@@ -274,27 +241,151 @@ usage: $0 [options]
   			    intervall: seconds to wait until polling
   -v			verbose
   -V			version info
+USAGE
 
-        }
-        else {
-        print <<"";
-  $NAME $VERSION
+    exit 0;
+}
 
-        }
-        exit 0;
-    }
-}   
-
+sub version {
+    print "  $NAME $VERSION\n";
+    exit 0;
+}
+   
 sub user_input {
-    my ($msg) = @_;
-    
+    my ($conf, $cond, $cmd, $msg) = @_; 
     my $input;
-    do {
-        print "$conf->{PROMPT} $msg";
-        chomp ($input = <STDIN>);
-    } until ($input =~ /^y$/i || $input =~ /^n$/i || $input eq undef);
     
-    return $input;
+    do {
+        $cmd .= '? ' if $cmd;
+	$msg .= ':' unless $msg =~ /:/;
+	
+        print "$conf->{PROMPT} $cmd$msg";
+        chomp ($input = <STDIN>);
+    } until ($input =~ /^y$/i || $input =~ /^n$/i || $input eq '');
+    
+    my $matched = 0;
+    
+    if ($input =~ /$cond/i) {
+        $matched = 1;
+    }
+    
+    return ($input, $matched);
+}
+
+sub poll {
+    my ($conf, $ftp, $dist) = @_;
+    
+    while (1) { 
+        my $string = 'second(s) until poll';
+	my $oldlen = 0;
+	    
+	test( $conf, fetch( $conf, $ftp ), read_track( $conf ), $ftp);
+	    
+	for (my $sec = $conf->{POLL}; $sec >= 1; $sec--) {
+	    do_verbose( $conf, 'STDERR', "$conf->{PREFIX} $sec " );
+		
+            my $fulllen = (length( $conf->{PREFIX} ) + 1 + length ( $sec ) + 1 + length( $string ));
+	    $oldlen = $fulllen unless $oldlen;
+	    my $blank = $oldlen - $fulllen;
+	    $oldlen = $fulllen;
+		
+	    print( $string, ' ' x $blank, "\b" x ($fulllen + $blank) ) if ($conf->{VERBOSE} && $sec != 1);
+	    $blank = 0;
+		
+	    sleep 1;
+	}
+        do_verbose( $conf, 'STDERR', "\n--> Polling\n" );
+    }
+}
+
+sub read_track {
+    my ($conf) = @_;   
+    my %got_file;
+
+    my $track = read_file( $conf->{track} ) or die "Could not read $conf->{track}: $!\n";
+    my @files = split /\n/, $track;
+    %got_file = map { $_ => 1 } @files;
+    
+    return \%got_file;
+}
+
+sub ftp_initiate {
+    my ($conf) = @_;
+    my $ftp;
+
+    $ftp = Net::FTP->new( $conf->{host}, Debug => $conf->{VERBOSE} );
+    die_mail( $conf, "Couldn't connect to $conf->{host}: $@") unless ($ftp);
+    
+    $ftp->login( 'anonymous','anonymous@example.com' )
+      or die_mail( $conf, "Couldn't login: ", $ftp->message ); 
+  
+    $ftp->binary or die_mail( $conf, "Couldn't switch to binary mode: ", $ftp->message );
+    
+    return $ftp;
+}
+
+sub ftp_redo {
+    my ($conf, $distdir, $getfile, $ftp) = @_;
+
+    my @files = $ftp->ls()
+      or die_mail( $conf, "Couldn't get list from /pub/PAUSE/$distdir: ", $ftp->message );
+      
+    my $gotdist;
+      
+    for my $file (@files) {
+        if ($file =~ /$getfile/) {
+            if ($ftp->get( "$file", "$conf->{dir}/$file" )) {
+                $gotdist = 1;
+	        last;
+	    }
+	}
+    }
+    
+    die_mail( $conf, "Couldn't get $getfile: ", $ftp->message ) unless $gotdist;
+}
+
+sub is_prereq {
+    my ($files, @install_prereqs) = @_;
+    
+    for my $nst_prereq (@install_prereqs) {
+        if ($files->[0] eq $nst_prereq) {
+	    return 1;
+        }
+    }
+
+    return 0;
+}
+
+sub dir_file_error {
+    my ($dist_dir) = @_;
+    
+    unless (chdir ( $dist_dir )) {
+        warn "--> Could not cd to $dist_dir, processing next distribution\n";
+	return 1;
+    }
+	
+    if (-e "$dist_dir/Build.PL") {
+        warn "--> Build.PL exists, processing next distribution\n";
+        return 1;
+    }
+    
+    return 0;
+}
+
+sub process_prereqs {
+    my ($conf, $makeargs, $getfile, $ftp, $distindex) = @_;
+    my ($install_prereqs, @prereqs);
+    
+    for my $prereq (sort keys %{$makeargs->{PREREQ_PM}}) {
+	do_verbose( $conf, 'STDERR', "--> Prerequisite $prereq not found\n" );
+	my $version = $makeargs->{PREREQ_PM}{$prereq} || '0.01';
+	$prereq =~ s/::/-/;
+	$getfile = "$prereq-$version.tar.gz";
+	next if process( $conf, '', "Fetch $getfile from CPAN? [Y/n]: ", '^n$' ); 
+	fetch_prereq( $conf, $getfile, $ftp, $distindex );
+	push( @prereqs, $getfile );
+	$install_prereqs++;
+    }
 }
 
 sub did_make_fail {
@@ -308,7 +399,7 @@ sub did_make_fail {
 }
 
 sub die_mail {
-    my @err = @_;
+    my ($conf, @err) = @_;
     
     my $login    = getlogin;
     
@@ -317,32 +408,35 @@ sub die_mail {
         warn "--> Reporting error coincidence via mail to $login", '@localhost', "\n";
     }
     
-    my $sendmail = '/usr/sbin/sendmail';
-    my $from     = "$NAME $VERSION <$NAME".'@localhost>';
-    my $to	 = "$login".'@localhost';
-    my $subject  = "error: @err";
+    my $send     = '/usr/sbin/sendmail';
+    my $from     = "$NAME $VERSION <$NAME\@localhost>";
+    my $to	 = "$login\@localhost";
+    my $subject  = "error";
     
-    open (my $sendmail, "| $sendmail -t") or die "Could not open | to $sendmail: $!\n";
+    open( my $sendmail, "| $send -t" ) or die "Could not open | to $send: $!\n";
     
-    my $selold = select ($sendmail);
+    my $selold = select( $sendmail );
     
     print <<"MAIL";
 From: $from
 To: $to
 Subject: $subject
+
 @err
 MAIL
-    close ($sendmail) or die "Could not close | to sendmail: $!\n";
-    select ($selold);
+    close( $sendmail ) or die "Could not close | to sendmail: $!\n";
+    select( $selold );
 }
 
 sub weed_out_track {
     my ($conf) = @_;
-
-    tie my @track, 'Tie::File', $conf->{track} or die "Could not open $conf->{track} for reading: $!\n";
-    
     my %file;
     
+    local $" = "\n";
+    
+    my $trackf = read_file( $conf->{track} ) or die "Could not open $conf->{track} for reading: $!\n";
+    my @track = split /\n/, $trackf;
+
     for (my $i = 0; $i < @track; ) {
         if ($file{$track[$i]}) {
 	    splice (@track, $i, 1);
@@ -352,33 +446,52 @@ sub weed_out_track {
 	$i++;
     }
     
-    @track = sort { $a cmp $b } @track;
+    @track = sort @track;
     
-    untie @track;
+    open( my $track, ">$conf->{track}" ) or die "Could not open $conf->{track} for writing: $!\n";
+    print $track "@track";
+    close( $track ) or die "Could not close $conf->{track}: $!\n";
 }
 
-sub do_interactive {
-    if ($conf->{INTERACTIVE}) {
-        my ($prompt, $cond, $eval) = @_;
+sub run_makefile {
+    my ($dist_dir) = @_;
     
-        my $input = user_input( $prompt );
+    my $MAKEFILE_PL = 'Makefile.PL';
     
-        eval $eval if $eval;
-        croak $@ if $@;
+    -e "$dist_dir/$MAKEFILE_PL"
+      ? do "$dist_dir/$MAKEFILE_PL"
+      : die "No $dist_dir/$MAKEFILE_PL found\n";
+}
+
+sub get_prereqs {
+    return { @_ };
+}
+
+sub process {
+    my ($conf, $cmd, $prompt, $cond, $dist) = @_;
     
-        return ($input =~ /$cond/i) ? 1 : 0;
-    }
+    if ($conf->{INTERACTIVE}) {        
+        my ($input, $matched) = user_input( $conf, $cond, $cmd, $prompt );
+    
+        if ($matched) {
+	    return 1;
+	} else {
+	    print `$cmd`;
+	    return 0;
+	}
+    } 
+    else {
+        print "$conf->{PREFIX} $cmd\n";
+	system( $cmd );
+    }   
+    
+    die_mail( $conf, "$dist: $cmd exited on $?\n" ) if $?;    
 }
 
 sub do_verbose {
-    if ($conf->{VERBOSE}) {
-        my ($eval, $out, @err) = @_;
+    my ($conf, $out, @err) = @_;
     
-        eval $eval if $eval;
-        croak @$ if $@;
-    
-        print $out @err;
-    }
+    print $out @err if ($conf->{VERBOSE} && $out && @err);
 }
 
 __END__
@@ -423,13 +536,9 @@ A .cpantesterrc may be placed in the appropriate home directory.
  
 =head1 MAIL
 
-Upon errors the coincidence will be reported via mail to login@localhost.
+Upon errors, the coincidence will be reported via mail to login@localhost.
 
 =head1 CAVEATS
-
-=head2 Prerequisites
-
-Distributions are skipped upon the detection of missing prerequisites.
 
 =head2 System requirements
 

@@ -1,5 +1,8 @@
 Revision history for Perl script cpantester.
 
+0.01_09 2005/02/27
+ - Prerequisites are fetched based upon the "dependency tree"
+
 0.01_08 2005/02/27
  - Configuration switches aren't holded global any longer.
  - The pass/fail grade of a distribution is being evaluated in a sub.

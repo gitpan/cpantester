@@ -1,5 +1,9 @@
 Revision history for Perl script cpantester.
 
+0.01_08 2005/02/27
+ - Configuration switches aren't holded global any longer.
+ - The pass/fail grade of a distribution is being evaluated in a sub.
+
 0.01_07 2005/02/26
  - Duplicate entries in the track file are removed.
 

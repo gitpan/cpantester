@@ -10,6 +10,7 @@ use vars qw(
     $ftp
 );
 use warnings;
+use CPANPLUS;
 use File::Slurp;
 use Getopt::Long;
 use Net::FTP;
@@ -17,9 +18,9 @@ use Test::Reporter;
 
 
 
-$PROMPT      = "\n#";
+$PROMPT = "#";
 $INTERACTIVE = 0;
-$VERBOSE     = 0;
+$VERBOSE  = 0;
 
 
 
@@ -36,19 +37,27 @@ sub test {
 
     for my $file (@{$files}) {
         next if ($got_file->{$file} || $file !~ /tar.gz$/);
+	
+	my ($dist) = $file =~ /(.*)\.tar.gz$/;
+	
+	if ($INTERACTIVE) {
+	    my $input = user_input( "$dist - Skip? [y/N]: " );
+            if ($input eq 'y') {
+	        print $TRACK "$file\n";
+		next;
+            }
+	}
       
         $ftp->get( $file, "$conf->{dir}/$file" )
           or die "Couldn't get $file: ", $ftp->message;
-	  
-	my $file = "$conf->{dir}/$file";
 	
 	my $error = 0;
 	
 	chdir ( "$conf->{dir}" ) or die "Couldn't cd to $conf->{dir}: $!\n";
 	
 	if ($INTERACTIVE) { 
-	    print "$PROMPT tar xvvzf $file -C $conf->{dir}? ";
-	    <STDIN>; 
+	    my $input = user_input( "tar xvvzf $file -C $conf->{dir}? [Y/n]: " );
+            next if ($input eq 'n'); 
 	} elsif ($VERBOSE) { 
 	    warn "tar xvvzf $file -C $conf->{dir}...\n" 
 	}
@@ -57,7 +66,6 @@ sub test {
 	if ($VERBOSE) { warn @tar }
 	die "Could not tar xvvzf $file -C $conf->{dir}: $?\n" if ($? != 0);
 	
-    	my ($dist) = $file =~ /(.*)\.tar.gz$/;
 	my $dist_dir = "$conf->{dir}/$dist";
 	
     	unless (chdir ( "$dist_dir" )) {
@@ -69,8 +77,8 @@ sub test {
 	
 	unless ($error) {
    	    if ($INTERACTIVE) { 
-	        print "$PROMPT perl Makefile.PL? ";
-	        <STDIN>; 
+		my $input = user_input( 'perl Makefile.PL? [Y/n]: ' );
+                next if ($input eq 'n');
 	    }
 	    my @makefile = `perl Makefile.PL`;
 	    die "perl Makefile.PL exited on $?\n" if ($? != 0);
@@ -81,17 +89,18 @@ sub test {
 	
 	    for my $line (@makefile) {
 	        if ($line =~ /(?:error|not found)/i) {
-	            print "Prerequisites missing, skipping...\n";
-		    $error = 1; last TEST;
+		    CPANPLUS::install( $dist );
+	            #print "Prerequisites missing, skipping...\n";
+		    #$error = 1 && last TEST;
 	        }
 	    }
         }
-        TEST:
+        #TEST:
 	
         unless ($error) {
             if ($INTERACTIVE) { 
-	        print "$PROMPT make? ";
-	        <STDIN>; 
+	        my $input = user_input( 'make? [Y/n]: ' );
+                next if ($input eq 'n');
 	    }
 	    my @make = `make`;
 	    die "make exited on $?\n" if ($? != 0);
@@ -101,8 +110,8 @@ sub test {
 	    }
 	    
 	    if ($INTERACTIVE) { 
-	        print "$PROMPT make test? ";
-	       <STDIN>; 
+	       	my $input = user_input( 'make test? [Y/n]: ' );
+                next if ($input eq 'n'); 
 	    }
 	    my @maketest = `make test`;
 	    die "make test exited on $?\n" if $? != 0;
@@ -136,8 +145,8 @@ sub test {
             }
     	    
             if ($INTERACTIVE) { 
-                print "$PROMPT make realclean? ";
-                <STDIN>;
+                my $input = user_input( 'make realclean? [Y/n]: ' );
+                next if ($input eq 'n'); 
             }
             my @makerealclean = `make realclean`;
             die "make realclean exited on $?\n" if ($? != 0);
@@ -147,8 +156,8 @@ sub test {
             }
     	    
             if ($INTERACTIVE) {
-                print "$PROMPT rm -rf $dist_dir? ";
-                <STDIN>;
+                my $input = user_input( "rm -rf $dist_dir? [Y/n]: " );
+                next if ($input eq 'n'); 
             }
             my @rm = `rm -rf $dist_dir`;
             die "rm -rf exited on $?\n" if ($? != 0);
@@ -191,7 +200,7 @@ sub fetch {
     my @files = $ftp->ls()
       or err_quit_ftp( $err_msg[4], $ftp );
 
-    @files = sort @files[ 0 .. $#files ];
+    @files = sort @files[ 2 .. $#files ];
     
     return \@files;
 }
@@ -256,6 +265,18 @@ usage: $0 [options]
     return \%conf;
 }   
 
+sub user_input {
+    my ($msg) = @_;
+    
+    my $input;
+    do {
+        print "$PROMPT $msg";
+        chomp ($input = <STDIN>);
+    } until ($input eq 'y' || $input eq 'n' || $input eq '');
+    
+    return $input;
+}
+
 sub err_quit {
     my ($err, $mode) = @_;
     
@@ -287,13 +308,14 @@ __END__
 
 =head1 NAME
 
-cpantester - test CPAN contributions and submit reports to cpan-testers@perl.org
+cpantester - Test CPAN contributions and submit reports to cpan-testers@perl.org
 
 =head1 SYNOPSIS
 
  usage: /scripts/cpantester.pl [options]
 
 =head1 OPTIONS
+
    -h            this help screen
    -i		 interactive (defies -v) 
    -v		 verbose
@@ -319,11 +341,6 @@ A .cpantesterrc may be placed in the appropriate home directory.
  mail  = user@host.tld (name)
 
 =head1 CAVEATS
-
-=head2 Prerequisites missing
-
-It's supposed to skip them at the moment, but I doubt some
-regexps are seriously broken and need further investigation.
 
 =head2 RSS
 

@@ -4,8 +4,9 @@ dist_version_from: cpantester.pl
 installdirs: site
 requires:
     CPANPLUS:       0
-    File::Slurp     0
+    File::Slurp:    0
     Test::Reporter: 0 
+    Tie::File:	    0
 distribution_type: script
 license: perl
 dist_abstract: Test CPAN contributions and submit reports to cpan-testers@perl.org

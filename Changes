@@ -1,5 +1,8 @@
 Revision history for Perl script cpantester.
 
+0.01_07 2005/02/26
+ - Duplicate entries in the track file are removed.
+
 0.01_06 2005/02/26
  - Interactive and verbose output are handled in appropriate subs.
 

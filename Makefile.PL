@@ -4,7 +4,8 @@ WriteMakefile(
     VERSION_FROM => 'cpantester.pl',
     PREREQ_PM    => { CPANPLUS => 0,
                       File::Slurp => 0,
-		      Test::Reporter => 0 },
+		      Test::Reporter => 0,
+		      Tie::File => 0 },
     ($] >= 5.005 
       ? (ABSTRACT_FROM => 'cpantester.pl') : ()
     ),

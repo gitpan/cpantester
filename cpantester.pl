@@ -12,23 +12,27 @@ use vars qw(
 );
 #use warnings;
 #no warnings 'once';
+use Carp 'croak';
 use File::Slurp;
 use File::Temp;
 use Getopt::Long;
 use Net::FTP;
 use Test::Reporter;
+use Tie::File;
 
-our ($conf, $file, $files, $got_file, $TRACK);
+our ($conf, $dist_dir, $file, $files, $got_file, $reporter, $stdout, $TRACK);
 
 $|++;
 
 main();
 
 sub main {
-    $VERSION = '0.01_06';
+    $VERSION = '0.01_07';
     $NAME = 'cpantester';
-
+    
     my $conf = parse_args();
+    
+    weed_out_track( $conf );
     
     if (not $POLL) {
         do_verbose( '', 'STDOUT', "--> Mode: non-polling, 1\n" );
@@ -89,7 +93,7 @@ sub test {
 	do_verbose( '', 'STDERR', @tar );
 	die_mail( "$dist: tar xvvzf $file -C $conf->{dir}: $?\n" ) if ($? != 0);
 	
-	my $dist_dir = "$conf->{dir}/$dist";
+	local $dist_dir = "$conf->{dir}/$dist";
 	
     	unless (chdir ( "$dist_dir" )) {
 	    warn "--> Could not cd to $dist_dir, processing next distribution\n"; 
@@ -105,7 +109,7 @@ sub test {
 	
 	next if do_interactive( 'perl Makefile.PL? [Y/n]: ', '^n$' );
 	    
-	my $stdout = tmpnam();
+	local $stdout = tmpnam();
 	my $stderr = tmpnam();
 	system( "perl Makefile.PL > $stdout 2>> $stderr" );
 	
@@ -113,7 +117,7 @@ sub test {
 	open ($TMPFILE, $stderr) or die_mail( "Could not open $stderr: $!\n" );
 	while (my $line = <$TMPFILE>) {
 	    if (my ($dist, $version) = $line =~ /^Warning: prerequisite (\w+::\w+) (.+) not found\.$/) {
-	        do_verbose( 'warn "--> Prerequisites not found, skipping\n" if $VERBOSE' );
+	        do_verbose( 'warn "--> Prerequisites not found, skipping\n" if $VERBOSE', 'STDOUT', '' );
 	        $skip = 1;
             }
         }    
@@ -121,7 +125,7 @@ sub test {
 		    
 	die_mail( "$dist: perl Makefile.PL exited on $?\n" ) if ($? != 0);
 	
-	do_verbose( 'warn "perl Makefile.PL...\n" unless $INTERACTIVE; warn read_file( $stdout );' );
+	do_verbose( 'warn "perl Makefile.PL...\n" unless $INTERACTIVE; warn read_file( $stdout );', 'STDOUT', '' );
 
         next if $skip;
 	
@@ -135,7 +139,7 @@ sub test {
 	
 	my @maketest = `make test`;
 	die_mail( "$dist: make test exited on $?\n" ) if $? != 0;
-	do_verbose( 'warn "make test...\n" unless $INTERACTIVE', 'STDOUT', @maketest );
+	do_verbose( 'warn "make test...\n" unless $INTERACTIVE', 'STDOUT', 'STDOUT', @maketest );
 
 	report( $conf, $dist, \@maketest );
 	
@@ -216,9 +220,9 @@ sub read_track {
 sub report {
     my ($conf, $dist, $maketest) = @_;
     
-    my $reporter = Test::Reporter->new();
+    local $reporter = Test::Reporter->new();
 		
-    do_verbose( '', 'STDERR', $reporter->debug( $VERBOSE ) );
+    do_verbose( '$reporter->debug( $VERBOSE )', 'STDERR', '' );
 	    
     $reporter->from( $conf->{mail} );
     $reporter->comments( "Automatically processed by $NAME $VERSION" );
@@ -299,7 +303,7 @@ sub user_input {
     do {
         print "$PROMPT $msg";
         chomp ($input = <STDIN>);
-    } until ($input =~ /^y$/i || $input =~ /^n$/i || $input eq '');
+    } until ($input =~ /^y$/i || $input =~ /^n$/i || $input eq undef);
     
     return $input;
 }
@@ -336,6 +340,27 @@ MAIL
     #exit ($? != 0) ? $? : -1;
 }
 
+sub weed_out_track {
+    my ($conf) = @_;
+
+    tie my @track, 'Tie::File', $conf->{track} or die "Could not open $conf->{track} for reading: $!\n";
+    
+    my %file;
+    
+    for (my $i = 0; $i < @track; ) {
+        if ($file{$track[$i]}) {
+	    splice (@track, $i, 1);
+	    next;
+	}
+        $file{$track[$i]}++;
+	$i++;
+    }
+    
+    @track = sort { $a cmp $b } @track;
+    
+    untie @track;
+}
+
 sub do_interactive {
     if ($INTERACTIVE) {
         my ($prompt, $cond, $eval) = @_;
@@ -343,7 +368,7 @@ sub do_interactive {
         my $input = user_input( $prompt );
     
         eval $eval if $eval;
-        die $@ if $@;
+        croak $@ if $@;
     
         return ($input =~ /$cond/i) ? 1 : 0;
     }
@@ -354,7 +379,7 @@ sub do_verbose {
         my ($eval, $out, @err) = @_;
     
         eval $eval if $eval;
-        die @$ if $@;
+        croak @$ if $@;
     
         print $out @err;
     }

@@ -1,0 +1,9 @@
+--- #YAML:1.0
+module_name: cpantester
+dist_version_from: cpantester.pl
+installdirs: site
+requires:
+    Test::Reporter: 0 
+distribution_type: script
+license: perl
+dist_abstract: Test CPAN contributions

@@ -1,4 +1,8 @@
 Revision history for Perl script cpantester.
 
+0.01_01 2005/02/25
+ - Several patches applied as suggested
+   by Uri Guttman.
+
 0.01_00 2005/02/25
  - Developer release.

@@ -11,15 +11,17 @@ use vars qw(
     $ftp
 );
 use warnings;
-#use CPANPLUS::Backend;
-#use CPANPLUS::Internals;
+no warnings 'once';
 use File::Slurp;
 use File::Temp;
 use Getopt::Long;
 use Net::FTP;
 use Test::Reporter;
+use XML::RSS::Parser;
 
-{
+main();
+
+sub main {
     my $conf = parse_args();
     
     if (not $POLL) {
@@ -47,7 +49,7 @@ sub test {
 	if ($INTERACTIVE) {
 	    my $input = user_input( "$dist - Skip? [y/N]: " );
             if ($input eq 'y') {
-	        print $TRACK "$file\n";
+	        print $TRACK "$file\n" unless $got_file->{$file};
 		next;
             }
 	}
@@ -82,32 +84,26 @@ sub test {
 
 	next if $skip;
 	
-	
    	if ($INTERACTIVE) { 
 	    my $input = user_input( 'perl Makefile.PL? [Y/n]: ' );
             next if ($input eq 'n');
 	}
 	    
-	my @fetch_dists;
-	    
 	my $stdout = tmpnam();
 	my $stderr = tmpnam();
 	system( "perl Makefile.PL > $stdout 2>> $stderr" );
-	open (TMPFILE, $stderr) or die_mail( "Could not open $stderr: $!\n" );
-	while (my $line = <TMPFILE>) {
+	
+	my $TMPFILE = \*TMPFILE;
+	open ($TMPFILE, $stderr) or die_mail( "Could not open $stderr: $!\n" );
+	while (my $line = <$TMPFILE>) {
 	    if (my ($dist, $version) = $line =~ /^Warning: prerequisite (\w+::\w+) (.+) not found\.$/) {
 	        $skip = 1;
             }
         }    
-	close (TMPFILE) or die_mail( "Could not close $stderr: $!\n" );	    
+	close ($TMPFILE) or die_mail( "Could not close $stderr: $!\n" );
+		    
 	die_mail( "$dist: perl Makefile.PL exited on $?\n" ) if ($? != 0);
-
-	#my $cb = CPANPLUS::Backend->new();
-	#$cb->fetch( modules => \@fetch_dists );
-	#$cb->install( modules => \@fetch_dists );
-	#my $id = CPANPLUS::Internals::_id ( $cb );
-	#CPANPLUS::Internals::_remove_id( $id );
-	    
+	
 	if ($VERBOSE) {
 	    warn "perl Makefile.PL...\n" unless $INTERACTIVE;
 	    warn read_file( $stdout );
@@ -161,7 +157,7 @@ sub test {
             warn @rm;
         }
 	
-        print $TRACK "$file\n";
+        print $TRACK "$file\n" unless $got_file->{$file};
     }
 
     close ($TRACK) or die_mail( "Couldn't close $conf->{track}: $!\n" );
@@ -179,13 +175,31 @@ sub fetch {
       or die_mail( "Couldn't login: ", $ftp->message ); 
   
     $ftp->binary or die_mail( "Couldn't switch to binary mode: ", $ftp->message );
-
-    $ftp->cwd( $conf->{rdir} )
-      or die_mail( "Couldn't change working directory: ", $ftp->message );
-  
-    my @files = $ftp->ls()
-      or die_mail( "Couldn't get list from $conf->{rdir}: ", $ftp->message );
-
+      
+    my @files;
+      
+    if ($conf->{rss}) {    
+	require LWP::UserAgent;
+ 
+        my $ua = LWP::UserAgent->new;
+        my $response = $ua->get( $conf->{rss_feed} );
+ 
+        if ($response->is_success) {
+            @files = $response->content =~ /<title>(.*?)<\/title>/gm;  
+        } else {
+            die_mail( $response->status_line );
+        }
+	
+	$ftp->cwd( $conf->{rdir} )
+          or die_mail( "Couldn't change working directory: ", $ftp->message ); 
+    } else {
+        $ftp->cwd( $conf->{rdir} )
+          or die_mail( "Couldn't change working directory: ", $ftp->message );
+        
+	@files = $ftp->ls()
+          or die_mail( "Couldn't get list from $conf->{rdir}: ", $ftp->message );
+    }
+   
     @files = sort @files[ 2 .. $#files ];
     
     return \@files;
@@ -213,7 +227,7 @@ sub report {
     $reporter->debug( $VERBOSE ) if $VERBOSE;
 	    
     $reporter->from( $conf->{mail} );
-    $reporter->comments("Automatically processed by $NAME $VERSION");
+    $reporter->comments( "Automatically processed by $NAME $VERSION" );
     $reporter->distribution( $dist );
 		    
     my $failed = 0;
@@ -309,9 +323,10 @@ sub die_mail {
     my $to	 = "$login".'@localhost';
     my $subject  = "error/exit: @err";
     
-    open (SENDMAIL, "| $sendmail -t") or die "Could not open | to $sendmail: $!\n";
+    my $SENDMAIL = \*SENDMAIL;
+    open ($SENDMAIL, "| $sendmail -t") or die "Could not open | to $sendmail: $!\n";
     
-    select (SENDMAIL);
+    select ($SENDMAIL);
     
     print <<"MAIL";
 From: $from
@@ -319,14 +334,14 @@ To: $to
 Subject: $subject
 @err
 MAIL
-    close (SENDMAIL) or die "Could not close | to sendmail: $!\n";
-    select (STDOUT);
+    close ($SENDMAIL) or die "Could not close | to sendmail: $!\n";
+    select ($SENDMAIL);
     
     exit ($? != 0) ? $? : -1;
 }
 
 BEGIN {
-    $VERSION = '0.01_03';
+    $VERSION = '0.01_04';
     $NAME = 'cpantester';
 }
 
@@ -361,27 +376,23 @@ L<Test::Reporter> is used to send the test reports.
 A .cpantesterrc may be placed in the appropriate home directory.
 
  # Example
- host  = pause.perl.org
- rdir  = incoming/
- dir   = /home/user/cpantests
- track = track.dat
- mail  = user@host.tld (name)
+ host		= pause.perl.org
+ rdir		= incoming/
+ dir		= /home/user/cpantester
+ track		= /home/user/cpantester/track.dat
+ mail		= user@host.tld (name)
+ rss		= 1
+ rss_feed	= http://search.cpan.org/recent.rdf
  
 =head1 MAIL
 
-Upon errors/exits the coincidence will be reported 
-via mail to login@localhost.
+Upon errors/exits the coincidence will be reported via mail to login@localhost.
 
 =head1 CAVEATS
 
 =head2 Prerequisites
 
 Distributions are skipped upon the detection of missing prerequisites.
-
-=head2 RSS
-
-File indexes are received by Net::FTP's ls(), though
-it's my intention to make it fetch the RSS-feed.
 
 =head1 SEE ALSO
 

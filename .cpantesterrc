@@ -1,5 +1,7 @@
-host  = pause.perl.org
-rdir  = incoming/
-dir   = /home/user/cpantester
-track = /home/user/cpantester/track.dat
-mail  = user@host.tld (name)
+host		= pause.perl.org
+rdir		= incoming/
+dir		= /home/user/cpantester
+track		= /home/user/cpantester/track.dat
+mail		= user@host.tld (name)
+rss		= 1
+rss_feed	= http://search.cpan.org/recent.rdf

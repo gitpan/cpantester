@@ -10,18 +10,22 @@ use vars qw(
     $POLL
     $ftp
 );
-use warnings;
-no warnings 'once';
+#use warnings;
+#no warnings 'once';
 use File::Slurp;
 use File::Temp;
 use Getopt::Long;
 use Net::FTP;
 use Test::Reporter;
-use XML::RSS::Parser;
+
+$|++;
 
 main();
 
 sub main {
+    $VERSION = '0.01_05';
+    $NAME = 'cpantester';
+
     my $conf = parse_args();
     
     if (not $POLL) {
@@ -29,7 +33,28 @@ sub main {
         test( $conf, fetch( $conf ), read_track( $conf ) );
     } else {
         print "--> Mode: polling, 1 <--> infinite\n" if $VERBOSE;
-        while (1) { test( $conf, fetch( $conf ), read_track( $conf ) ) }
+        while (1) { 
+	    my $PREFIX = '-->';
+	    my $string = 'second(s) until polling again';
+	    my $oldlen = 0;
+	    
+	    test( $conf, fetch( $conf ), read_track( $conf ) ); 
+	    
+	    for (my $sec = $POLL; $sec >= 1; $sec--) {
+	        print "$PREFIX $sec " if $VERBOSE;
+		
+		my $fulllen = (length( $PREFIX ) + 1 + length ( $sec ) + 1 + length( $string ));
+		$oldlen = $fulllen unless $oldlen;
+		my $blank = $oldlen - $fulllen;
+		$oldlen = $fulllen;
+		
+		print( $string, ' ' x $blank, "\b" x ($fulllen + $blank) ) if ($VERBOSE && $sec != 1);
+		$blank = 0;
+		
+		sleep 1;
+	    }
+	    print "\n--> Polling\n" if $VERBOSE;
+	}
     }
     
     exit 0;
@@ -48,7 +73,7 @@ sub test {
 	
 	if ($INTERACTIVE) {
 	    my $input = user_input( "$dist - Skip? [y/N]: " );
-            if ($input eq 'y') {
+            if ($input =~ /^y$/i) {
 	        print $TRACK "$file\n" unless $got_file->{$file};
 		next;
             }
@@ -63,7 +88,7 @@ sub test {
 	
 	if ($INTERACTIVE) { 
 	    my $input = user_input( "tar xvvzf $file -C $conf->{dir}? [Y/n]: " );
-            next if ($input eq 'n'); 
+            next if ($input =~ /^n$/); 
 	}
 	
     	my @tar = `tar xvvzf $file -C $conf->{dir}`;
@@ -86,7 +111,7 @@ sub test {
 	
    	if ($INTERACTIVE) { 
 	    my $input = user_input( 'perl Makefile.PL? [Y/n]: ' );
-            next if ($input eq 'n');
+            next if ($input =~ /^n$/i);
 	}
 	    
 	my $stdout = tmpnam();
@@ -113,7 +138,7 @@ sub test {
 	
         if ($INTERACTIVE) { 
 	    my $input = user_input( 'make? [Y/n]: ' );
-            next if ($input eq 'n');
+            next if ($input =~ /^n$/i);
 	}
 	my @make = `make`;
 	die_mail( "$dist: make exited on $?\n" ) if ($? != 0);
@@ -124,7 +149,7 @@ sub test {
 	   
 	if ($INTERACTIVE) { 
 	    my $input = user_input( 'make test? [Y/n]: ' );
-            next if ($input eq 'n'); 
+            next if ($input =~ /^n$/i); 
 	}
 	my @maketest = `make test`;
 	die_mail( "$dist: make test exited on $?\n" ) if $? != 0;
@@ -137,7 +162,7 @@ sub test {
     	    
         if ($INTERACTIVE) { 
             my $input = user_input( 'make realclean? [Y/n]: ' );
-            next if ($input eq 'n'); 
+            next if ($input =~ /^n$/i); 
         }
         my @makerealclean = `make realclean`;
         die_mail( "$dist: make realclean exited on $?\n" ) if ($? != 0);
@@ -148,7 +173,7 @@ sub test {
     	    
         if ($INTERACTIVE) {
             my $input = user_input( "rm -rf $dist_dir? [Y/n]: " );
-            next if ($input eq 'n'); 
+            next if ($input =~ /^n$/i); 
         }
         my @rm = `rm -rf $dist_dir`;
         die_mail( "$dist: rm -rf exited on $?\n" ) if ($? != 0);
@@ -157,7 +182,7 @@ sub test {
             warn @rm;
         }
 	
-        print $TRACK "$file\n" unless $got_file->{$file};
+        print $TRACK "$file\n"; # unless $got_file->{$file};
     }
 
     close ($TRACK) or die_mail( "Couldn't close $conf->{track}: $!\n" );
@@ -269,21 +294,22 @@ sub usage {
     
     $PROMPT = "#";
     
-    GetOptions(\%opt, 'h', 'i', 'p', 'v', 'V') or $opt{'h'} = 1;
+    GetOptions(\%opt, 'h', 'i', 'p=i', 'v', 'V') or $opt{'h'} = 1;
     
     $INTERACTIVE = $opt{i} ? 1 : 0;
     $VERBOSE     = $opt{v} ? 1 : 0;
-    $POLL	 = $opt{p} ? 1 : 0;
+    $POLL	 = $opt{p} ? $opt{p} : 0;
 
     if ($opt{'h'} || $opt{'V'}) {
         if ($opt{'h'}) {
             print <<"";
 usage: $0 [options]
-  -h            this help screen
-  -i		interactive (defies -v) 
-  -p		run in polling mode
-  -v		verbose
-  -V            version info
+  -h			this help screen
+  -i			interactive (defies -v) 
+  -p intervall		run in polling mode 
+  			    intervall: seconds to wait until polling
+  -v			verbose
+  -V			version info
 
         }
         else {
@@ -304,7 +330,7 @@ sub user_input {
     do {
         print "$PROMPT $msg";
         chomp ($input = <STDIN>);
-    } until ($input eq 'y' || $input eq 'n' || $input eq '');
+    } until ($input =~ /^y$/i || $input =~ /^n$/i || $input eq '');
     
     return $input;
 }
@@ -315,18 +341,18 @@ sub die_mail {
     my $login    = getlogin;
     
     if ($VERBOSE) {
-        warn "--> Reporting error/exit coincidence via mail to $login", '@localhost', "\n";
+        warn "--> Reporting error coincidence via mail to $login", '@localhost', "\n";
     }
     
     my $sendmail = '/usr/sbin/sendmail';
     my $from     = "$NAME $VERSION <$NAME".'@localhost>';
     my $to	 = "$login".'@localhost';
-    my $subject  = "error/exit: @err";
+    my $subject  = "error: @err";
     
     my $SENDMAIL = \*SENDMAIL;
     open ($SENDMAIL, "| $sendmail -t") or die "Could not open | to $sendmail: $!\n";
     
-    select ($SENDMAIL);
+    my $selold = select ($SENDMAIL);
     
     print <<"MAIL";
 From: $from
@@ -335,14 +361,9 @@ Subject: $subject
 @err
 MAIL
     close ($SENDMAIL) or die "Could not close | to sendmail: $!\n";
-    select ($SENDMAIL);
+    select ($selold);
     
-    exit ($? != 0) ? $? : -1;
-}
-
-BEGIN {
-    $VERSION = '0.01_04';
-    $NAME = 'cpantester';
+    #exit ($? != 0) ? $? : -1;
 }
 
 __END__
@@ -357,11 +378,12 @@ cpantester - Test CPAN contributions and submit reports to cpan-testers@perl.org
 
 =head1 OPTIONS
 
-   -h            this help screen
-   -i		 interactive (defies -v)
-   -p		 run in polling mode 
-   -v		 verbose
-   -V            version info
+   -h			this help screen
+   -i			interactive (defies -v)
+   -p intervall		run in polling mode 
+  			    intervall: seconds to wait until poll again
+   -v			verbose
+   -V			version info
 
 =head1 DESCRIPTION
 
@@ -381,7 +403,7 @@ A .cpantesterrc may be placed in the appropriate home directory.
  dir		= /home/user/cpantester
  track		= /home/user/cpantester/track.dat
  mail		= user@host.tld (name)
- rss		= 1
+ rss		= 0
  rss_feed	= http://search.cpan.org/recent.rdf
  
 =head1 MAIL

@@ -1,5 +1,8 @@
 Revision history for Perl script cpantester.
 
+0.01_05 2005/02/26
+ - Added verbose output when run in polling mode.
+
 0.01_03 2005/02/25
  - Fatal errors and exits will be reported via mail to login@localhost.
  - Distributions are skipped upon the detection of prerequisites.
